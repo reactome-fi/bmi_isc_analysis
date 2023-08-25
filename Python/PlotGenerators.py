@@ -197,8 +197,10 @@ def squarify_umap(plot, adata, colorbar=False, is_seurat=False):
         adjusty = (yrange - xrange)/2
         plot.set_xlim(plot.get_xlim()[0] - adjusty, plot.get_xlim()[1] + adjusty)
     else:
-        plot.set_ylim(plot.get_ylim()[0] - adjusty, plot.get_ylim()[1] + adjusty)
-
+        if adjusty > 0:
+            plot.set_ylim(plot.get_ylim()[0] - adjusty, plot.get_ylim()[1] + adjusty)
+        else:
+            plot.set_xlim(plot.get_xlim()[0] + adjusty, plot.get_xlim()[1] - adjusty)
     return plot    
 
 

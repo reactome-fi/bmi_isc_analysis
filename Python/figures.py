@@ -1,3 +1,6 @@
+import warnings
+warnings.simplefilter('ignore')
+
 import os
 os.chdir(os.getcwd())
 out_dir =  "bmi_figuresl_script/"
