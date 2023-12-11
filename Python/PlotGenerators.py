@@ -8,7 +8,10 @@ import os.path as path
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import scrublet as scr
 import scanpy.external as sce
+from pyrovelocity import cytotrace
+import networkx as nx
 
 DPI = 720 
 # Need a customized map
@@ -69,7 +72,9 @@ def run_paga(adata:sc.AnnData):
     adata.uns['paga']['pos'] = _reset_paga_pos(adata)
 
 
-def run_umap_via_paga(adata:sc.AnnData, use_rep = None):
+def run_umap_via_paga(adata:sc.AnnData, 
+                      leiden_resolution: float=1.0, 
+                      use_rep = None):
     """
     Follow the procedure outlined in https://scanpy-tutorials.readthedocs.io/en/latest/pbmc3k.html
     by running paga first as the init_pos.
@@ -82,7 +87,7 @@ def run_umap_via_paga(adata:sc.AnnData, use_rep = None):
         sc.pp.pca(adata, random_state=random_state)
         use_rep = 'X_pca'
     sc.pp.neighbors(adata, use_rep=use_rep, random_state=random_state)
-    sc.tl.leiden(adata, random_state=random_state)
+    sc.tl.leiden(adata, random_state=random_state, resolution=leiden_resolution)
     sc.tl.paga(adata)
     sc.pl.paga(adata, plot=False, random_state=random_state, show=False)
     sc.tl.umap(adata, random_state=random_state, init_pos='paga')
@@ -142,12 +147,24 @@ def open_data(file: str,
 
 
 def run_umap(adata,
-             need_run_variable: bool=False):
+             need_run_variable: bool=False,
+             leiden_resolution: float=1):
+    """A wrapper for running umap after pre-processing
+
+    Args:
+        adata (_type_): _description_
+        need_run_variable (bool, optional): _description_. Defaults to False.
+        leiden_resolution (float, optional): With leidenalg version 0.9.1, need 0.25 to generated 5 clusters
+        for the frozen E12.5 data. Defaults to 1.
+
+    Returns:
+        _type_: _description_
+    """
     if need_run_variable:
         sc.pp.highly_variable_genes(adata)
     sc.pp.pca(adata, random_state=random_state)
     sc.pp.neighbors(adata, random_state=random_state)
-    sc.tl.leiden(adata, random_state=random_state)
+    sc.tl.leiden(adata, random_state=random_state, resolution=leiden_resolution)
     sc.tl.umap(adata, random_state=random_state)
     return adata
 
@@ -155,7 +172,8 @@ def run_umap(adata,
 def merge(source: sc.AnnData,
           target: sc.AnnData,
           batch_categories: str = None,
-          batch_correction: str = None):
+          batch_correction: str = None,
+          re_run_highly_variable_genes: bool = False):
     """
     Merge the source dataset into the target dataset
     :param source:
@@ -166,13 +184,15 @@ def merge(source: sc.AnnData,
     """
     merged = source.concatenate(target, batch_categories=batch_categories)
     if batch_correction is not None:
-        sc.pp.pca(merged) # Need to conduct pca first for both batch correction
+        if re_run_highly_variable_genes:
+            sc.pp.highly_variable_genes(merged, batch_key='batch')
+        sc.pp.pca(merged, random_state=random_state) # Need to conduct pca first for both batch correction
         if batch_correction == 'harmony':
             sce.pp.harmony_integrate(merged, 'batch')
         elif batch_correction == 'bbknn':
             # See https://github.com/theislab/scanpy/issues/514
-            import bbknn
-            bbknn.bbknn(merged, 'batch')
+            # import bbknn
+            sce.pp.bbknn(merged, 'batch')
         else:
             raise ValueError("{} is not supported in batch correction.".format(batch_correction))
     # Want to split them into the original data for doing whatever it is needed
@@ -204,3 +224,79 @@ def squarify_umap(plot, adata, colorbar=False, is_seurat=False):
     return plot    
 
 
+def calculate_overlap_via_neighbors(adata: sc.AnnData):
+    """
+    Calculate the overlap of two datasetes in the passed merged data based on neighbors.
+    Make sure connectivities is in the obsp keys.
+    :param adata:
+    :return:
+    """
+    neighbor_key = 'connectivities'
+    if neighbor_key not in adata.obsp.keys():
+        raise ValueError("{} not in obsp.".format(neighbor_key))
+    # For easy handling, generate a network object
+    network = nx.Graph(adata.obsp[neighbor_key])
+    overlap_counter = 0
+    total_nodes = 0
+    for n in network:
+        n_batch = adata.obs['batch'][n]
+        total_nodes += 1
+        # Get it neighbor
+        neigbors = network.neighbors(n)
+        isOverlapped = False
+        for nb in neigbors:
+            nb_batch = adata.obs['batch'][nb]
+            if n_batch != nb_batch:
+                overlap_counter += 1
+                break
+    percentage = overlap_counter / total_nodes
+    print("Total overlapped: {} in total {}: {}".format(overlap_counter, total_nodes, percentage))
+
+
+def run_scrublet_doublet(adata_raw: sc.AnnData,
+                         remove_doublet: bool = True):
+    """Conduct a dublet detection using scrublet. When this method returns, two new keys will be added
+    into the obs of adata_raw: scrublet_doublet_score and scrublet_doublet.
+
+    Args:
+        adata (sc.AnnData): Make sure adata has not been pre-processed. The original raw counts are needed.
+    """
+    scrub = scr.Scrublet(adata_raw.X)
+    doublet_scores, predicted_doublets = scrub.scrub_doublets()
+    adata_raw.obs['scrublet_doublet_score'] = doublet_scores
+    adata_raw.obs['scrublet_doublet'] = pd.Categorical(predicted_doublets)
+    # Check how many doublets
+    total_doublets = sum(adata_raw.obs['scrublet_doublet'])
+    print('Total doublets: {}'.format(total_doublets))
+    if (remove_doublet):
+        adata_raw = adata_raw[~(adata_raw.obs['scrublet_doublet'] == True)] # Need to call this
+    return adata_raw
+
+
+def plot_qa_metrix(adata: sc.AnnData):
+    sc.pl.violin(adata, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'],
+             jitter=0.4, multi_panel=True)
+    sc.pl.scatter(adata, x='total_counts', y='pct_counts_mt')
+    sc.pl.scatter(adata, x='total_counts', y='n_genes_by_counts')
+
+
+def run_cytotrace(adata: sc.AnnData):
+    cytotrace_results = cytotrace.cytotrace(adata=adata, layer="raw", solver='fnnls')
+    adata.obs['pyrovelocity_cytotrace'] = cytotrace_results['CytoTRACE']
+
+
+def analyze_markers(adata : sc.AnnData, 
+                    save_plot: str,
+                    save_markers: str,
+                    groupby: str = 'leiden',
+                    pval_cutoff: float = 0.05,
+                    log2fc_min: float = 0.58): # 1.5 fold
+    sc.tl.rank_genes_groups(adata, groupby=groupby)
+    sc.pl.rank_genes_groups(adata, n_genes=25, sharey=False, save=save_plot)
+    # Output the dataframe into a file if needed
+    groups = adata.obs[groupby].unique()
+    rank_genes_groups_df = sc.get.rank_genes_groups_df(adata, groups, pval_cutoff=pval_cutoff, log2fc_min=log2fc_min)
+    print(rank_genes_groups_df.shape)
+    print(rank_genes_groups_df.groupby('group').count()['names'].sort_values())
+    if save_markers:
+        rank_genes_groups_df.to_csv(save_markers, index=False)
