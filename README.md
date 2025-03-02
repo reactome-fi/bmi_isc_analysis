@@ -8,5 +8,6 @@ The resources folder contains static files to help with reproducing the results 
 
 Python and R scripts are in their respective folders and should output results within their directories. 
 
-The release was updated so that a DOI could be generated automatically via Zenodo.
+The release was updated so that a DOI could be generated automatically via Zenodo. The generated DOI is: 10.5281/zenodo.14957091.
+
 
